@@ -1,61 +1,66 @@
 function FindProxyForURL(url, host) {
-    const httpProxy = "PROXY 192.168.1.55:10808"; // HTTP代理地址
-    const socksProxy = "SOCKS5 192.168.1.55:10808"; // SOCKS5代理地址
-    const direct = "DIRECT"; // 直接连接
-
-    // 动态域名后缀和IP范围（可扩展或从外部加载）
-    const chinaDomainSuffixes = [
-        ".cn", ".gov.cn", ".edu.cn", ".com.cn", ".org.cn",
-        ".net.cn", ".mil.cn", ".taobao", ".jd"
-    ];
-    const chinaIPRanges = [
-        ["1.0.0.0", "255.255.255.0"],   // 1.0.0.0/8
-        ["36.0.0.0", "255.255.0.0"],   // 36.0.0.0/16
-        ["106.0.0.0", "255.255.0.0"],  // 106.0.0.0/16
-        ["115.0.0.0", "255.255.0.0"],  // 115.0.0.0/16
-        ["124.0.0.0", "255.255.0.0"],  // 124.0.0.0/16
-        ["223.0.0.0", "255.255.255.0"] // 223.0.0.0/24
-    ];
-
-    // 应用白名单（需配合系统代理设置）
-    const allowedApps = ["com.google.youtube", "com tiktok.tiktok"];
-
-    // 检查是否为中国大陆域名
-    function isChinaDomain(host) {
-        return chinaDomainSuffixes.some(suffix => dnsDomainIs(host, suffix));
+    // 代理服务器配置（仅保留单节点）
+    const TARGET_PROXY = "PROXY 192.168.1.55:10808";
+    const DIRECT = "DIRECT";
+    
+    // 精确匹配本地地址规则
+    const localDomains = ["localhost", "127.0.0.1", "::1"];
+    const localNets = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"];
+    
+    // 基础检测函数
+    function isLocalHost(host) {
+        return localDomains.includes(host) || 
+               isInNet(host, "127.0.0.1", "255.0.0.0") ||
+               isInNet(host, "::1", "ffff:ffff:ffff:ffff::");
     }
 
-    // 判断 IP 是否属于中国大陆范围（支持IPv6）
-    function isChinaIP(ip) {
-        if (!ip) return false;
-        if (ip.indexOf(":") !== -1) {
-            // IPv6地址处理逻辑（简化示例）
-            return ip.startsWith("2408") || ip.startsWith("2409");
+    // 代理连通性检测（带超时控制）
+    async function checkProxyLatency() {
+        const testUrl = "http://192.168.1.55:10808/ping"; // 假设代理有健康检查接口
+        const timeout = 2000; // 2秒超时
+        
+        try {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), timeout);
+            
+            const response = await fetch(testUrl, {
+                method: 'HEAD',
+                signal: controller.signal,
+                mode: 'no-cors'
+            });
+            
+            clearTimeout(timer);
+            return response ? 100 : Infinity; // 返回模拟延迟值
+        } catch (e) {
+            return Infinity;
         }
-        return chinaIPRanges.some(range => isInNet(ip, range[0], range[1]));
     }
 
-    // 检查是否为HTTPS请求
-    function isHttpsRequest(url) {
-        return url.startsWith("https://");
-    }
+    // 主决策逻辑
+    (async function() {
+        // 本地地址直连
+        if (isPlainHostName(host) || 
+            isLocalHost(host) || 
+            isInNet(host, "10.0.0.0", "255.0.0.0") ||
+            isInNet(host, "172.16.0.0", "255.240.0.0") ||
+            isInNet(host, "192.168.0.0", "255.255.0.0")) {
+            return DIRECT;
+        }
 
-    // 检查是否在白名单中
-    function isAllowedApp(host) {
-        return allowedApps.some(app => host.includes(app));
-    }
-
-    // 主逻辑
-    const resolvedIP = dnsResolve(host);
-    const isChina = isChinaDomain(host) || isChinaIP(resolvedIP);
-    const isAppWhitelisted = isAllowedApp(host);
-
-    // 国内外请求分流与多协议支持
-    if (isChina || isAppWhitelisted) {
-        return direct; // 中国大陆请求或白名单应用直接连接
-    } else {
-        return isHttpsRequest(url)
-            ? socksProxy // HTTPS请求使用SOCKS5代理
-            : httpProxy; // 默认HTTP代理
-    }
+        // 代理服务器连通性检测
+        const latency = await checkProxyLatency();
+        
+        // 根据延迟动态选择
+        if (latency <= 500) { // 阈值可根据实际调整
+            return TARGET_PROXY;
+        } else {
+            // 检测直连可行性
+            try {
+                const directTest = await fetch(url, { method: 'HEAD', mode: 'no-cors' });
+                return directTest ? DIRECT : TARGET_PROXY; // 保底使用代理
+            } catch (e) {
+                return TARGET_PROXY; // 网络异常时仍走代理
+            }
+        }
+    })();
 }
